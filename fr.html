@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>FNF Online P2P - PeerJS</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --note-left: #c24b99;
+            --note-down: #00ffff;
+            --note-up: #12fa05;
+            --note-right: #f9393f;
+        }
+
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            overflow: hidden;
+            font-family: 'Arial Black', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            user-select: none;
+        }
+
+        #game-container {
+            position: relative;
+            width: 1280px;
+            height: 720px;
+            background: linear-gradient(to bottom, #333, #000);
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            border: 4px solid #fff;
+        }
+
+        canvas { display: block; width: 100%; height: 100%; }
+
+        #ui-layer {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex; flex-direction: column; align-items: center;
+        }
+
+        .score-text {
+            margin-top: 20px;
+            font-size: 24px;
+            text-shadow: 2px 2px 0 #000;
+            display: flex;
+            gap: 50px;
+        }
+
+        .p1-score { color: #31b0d1; }
+        .p2-score { color: #af66ce; }
+
+        /* ESTILO DO MENU ONLINE */
+        #lobby-screen {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            z-index: 20;
+            text-align: center;
+        }
+
+        .lobby-box {
+            background: #222;
+            padding: 40px;
+            border-radius: 15px;
+            border: 2px solid #555;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            width: 400px;
+        }
+
+        input {
+            padding: 15px;
+            font-size: 18px;
+            text-align: center;
+            border-radius: 5px;
+            border: none;
+        }
+
+        button {
+            padding: 15px;
+            font-size: 20px;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+            color: black;
+            font-weight: bold;
+            text-transform: uppercase;
+            border-radius: 5px;
+            transition: transform 0.1s;
+        }
+        
+        button:active { transform: scale(0.95); }
+
+        .btn-host { background: #31b0d1; }
+        .btn-join { background: #af66ce; }
+        
+        #status-msg { margin-top: 20px; color: yellow; font-size: 18px; }
+        #my-id-display { user-select: text; color: #00ffff; font-size: 24px; margin: 10px 0; word-break: break-all;}
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-layer">
+        <div class="score-text">
+            <span class="p2-score">OPONENTE: 0</span>
+            <span class="p1-score">VOCÊ: 0</span>
+        </div>
+    </div>
+
+    <div id="lobby-screen">
+        <h1>FNF ONLINE (P2P)</h1>
+        <div class="lobby-box" id="initial-menu">
+            <button class="btn-host" onclick="setupHost()">CRIAR SALA (HOST)</button>
+            <p>- OU -</p>
+            <input type="text" id="remote-id" placeholder="Cole o ID do amigo aqui">
+            <button class="btn-join" onclick="joinGame()">ENTRAR NA SALA</button>
+        </div>
+
+        <div class="lobby-box" id="host-menu" style="display:none;">
+            <p>Mande este ID para seu amigo:</p>
+            <div id="my-id-display">Gerando ID...</div>
+            <p id="waiting-msg">Aguardando conexão...</p>
+        </div>
+        
+        <div id="status-msg"></div>
+    </div>
+</div>
+
+<script>
+/**
+ * FNF ONLINE P2P ENGINE (PeerJS)
+ * Nenhuma instalação de servidor necessária.
+ */
+
+const CONFIG = {
+    BPM: 135,
+    SCROLL_SPEED: 2.8,
+    NOTE_SIZE: 50,
+    HIT_WINDOW: 150,
+};
+
+const COLORS = ['#c24b99', '#00ffff', '#12fa05', '#f9393f'];
+
+// --- SISTEMA DE REDE P2P ---
+let peer = null;
+let conn = null;
+let isHost = false;
+let myPlayerId = 'p1'; // Host é p1 (direita), Cliente é p2 (esquerda)
+
+function setupHost() {
+    isHost = true;
+    myPlayerId = 'p1'; // Eu sou o Host, controlo o Azul
+    document.getElementById('initial-menu').style.display = 'none';
+    document.getElementById('host-menu').style.display = 'flex';
+    
+    // Cria conexão Peer
+    peer = new Peer(); 
+    
+    peer.on('open', (id) => {
+        document.getElementById('my-id-display').innerText = id;
+    });
+
+    peer.on('connection', (c) => {
+        conn = c;
+        setupConnectionEvents();
+        document.getElementById('waiting-msg').innerText = "Amigo Conectado! Iniciando...";
+        setTimeout(() => {
+            // Envia sinal de start para garantir sincronia
+            conn.send({ type: 'START_GAME' });
+            game.start();
+        }, 1000);
+    });
+}
+
+function joinGame() {
+    isHost = false;
+    myPlayerId = 'p2'; // Eu sou o Cliente, controlo o Roxo
+    const peerId = document.getElementById('remote-id').value;
+    if(!peerId) return alert("Cole o ID do amigo!");
+
+    document.getElementById('status-msg').innerText = "Conectando...";
+    peer = new Peer();
+
+    peer.on('open', () => {
+        conn = peer.connect(peerId);
+        setupConnectionEvents();
+    });
+}
+
+function setupConnectionEvents() {
+    conn.on('open', () => {
+        document.getElementById('status-msg').innerText = "Conexão Estabelecida!";
+    });
+
+    conn.on('data', (data) => {
+        handleNetworkData(data);
+    });
+    
+    conn.on('error', (err) => alert("Erro: " + err));
+}
+
+function handleNetworkData(data) {
+    if (data.type === 'START_GAME') {
+        game.start();
+    }
+    if (data.type === 'KEY_DOWN') {
+        // O outro jogador apertou uma tecla
+        // Se eu sou P1, recebo dados do P2. Se sou P2, recebo do P1.
+        const otherPlayer = isHost ? 'p2' : 'p1';
+        game.triggerRemoteKey(otherPlayer, data.lane, true);
+    }
+    if (data.type === 'KEY_UP') {
+        const otherPlayer = isHost ? 'p2' : 'p1';
+        game.triggerRemoteKey(otherPlayer, data.lane, false);
+    }
+    if (data.type === 'HIT_SCORE') {
+        const otherPlayer = isHost ? 'p2' : 'p1';
+        game.registerHit(otherPlayer, data.diff, true); // true = remote
+    }
+}
+
+// --- ENGINE DE ÁUDIO ---
+class MusicEngine {
+    constructor() {
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.isPlaying = false;
+        this.startTime = 0;
+    }
+
+    start() {
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        this.startTime = this.ctx.currentTime;
+        this.isPlaying = true;
+        this.scheduleBeat();
+    }
+
+    scheduleBeat() {
+        if(!this.isPlaying) return;
+        const time = this.ctx.currentTime;
+        const beatLen = 60 / CONFIG.BPM;
+        const nextBeat = Math.ceil((time - this.startTime) / beatLen) * beatLen + this.startTime;
+        
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.frequency.value = 100;
+        osc.frequency.exponentialRampToValueAtTime(0.01, nextBeat + 0.1);
+        gain.gain.setValueAtTime(0.5, nextBeat);
+        gain.gain.exponentialRampToValueAtTime(0.01, nextBeat + 0.1);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(nextBeat);
+        osc.stop(nextBeat + 0.1);
+
+        setTimeout(() => {
+            if(this.isPlaying) game.onBeatHit();
+            this.scheduleBeat();
+        }, (nextBeat - time) * 1000);
+    }
+
+    getCurrentTime() {
+        if (!this.isPlaying) return 0;
+        return (this.ctx.currentTime - this.startTime) * 1000;
+    }
+}
+
+class Note {
+    constructor(time, lane, playerOwner) {
+        this.time = time;
+        this.lane = lane; 
+        this.playerOwner = playerOwner; // 'p1' ou 'p2'
+        this.hit = false;
+        this.missed = false;
+    }
+}
+
+class Game {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.music = new MusicEngine();
+        this.canvas.width = 1280;
+        this.canvas.height = 720;
+
+        this.notes = [];
+        this.p1Score = 0;
+        this.p2Score = 0;
+        this.health = 50;
+        this.winner = null;
+
+        this.p1Keys = [false, false, false, false]; 
+        this.p2Keys = [false, false, false, false];
+        this.p1Scale = 1; this.p2Scale = 1;
+
+        this.bindInput();
+        this.loop = this.loop.bind(this);
+    }
+
+    generateChart() {
+        // Gera um chart fixo (seed pseudo-fixo) para garantir que ambos tenham as mesmas notas
+        const totalBeats = 300; 
+        const msPerBeat = (60000 / CONFIG.BPM);
+        
+        // Função pseudo-aleatória simples para sincronia
+        let seed = 1234;
+        const random = () => {
+            var x = Math.sin(seed++) * 10000;
+            return x - Math.floor(x);
+        }
+
+        for (let i = 0; i < totalBeats; i++) {
+            if (i > 4 && random() > 0.4) {
+                this.notes.push(new Note(i * msPerBeat, Math.floor(random()*4), 'p1'));
+            }
+            if (i > 4 && random() > 0.4) {
+                this.notes.push(new Note(i * msPerBeat, Math.floor(random()*4), 'p2'));
+            }
+        }
+        this.notes.sort((a, b) => a.time - b.time);
+    }
+
+    start() {
+        this.generateChart();
+        this.music.start();
+        document.getElementById('lobby-screen').style.display = 'none';
+        requestAnimationFrame(this.loop);
+    }
+
+    bindInput() {
+        window.addEventListener('keydown', (e) => {
+            if(e.repeat) return;
+            const lane = this.getLane(e.key);
+            
+            // Só processo input se for MINHA vez de jogar
+            // Se sou P1, só processo teclas para P1.
+            if (lane !== -1) {
+                // Atualiza visualmente LOCALMENTE
+                if(myPlayerId === 'p1') this.p1Keys[lane] = true;
+                else this.p2Keys[lane] = true;
+
+                // Tenta acertar a nota LOCALMENTE
+                this.checkHit(lane, myPlayerId);
+
+                // Envia para o amigo pela internet
+                if(conn && conn.open) {
+                    conn.send({ type: 'KEY_DOWN', lane: lane });
+                }
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const lane = this.getLane(e.key);
+            if (lane !== -1) {
+                if(myPlayerId === 'p1') this.p1Keys[lane] = false;
+                else this.p2Keys[lane] = false;
+
+                if(conn && conn.open) {
+                    conn.send({ type: 'KEY_UP', lane: lane });
+                }
+            }
+        });
+    }
+
+    // Input Remoto (Vindo da internet)
+    triggerRemoteKey(player, lane, isDown) {
+        if(player === 'p1') this.p1Keys[lane] = isDown;
+        else this.p2Keys[lane] = isDown;
+    }
+
+    getLane(key) {
+        // Agora ambos os jogadores podem usar as setas ou WASD, 
+        // já que estão em teclados diferentes!
+        const map = { 
+            'ArrowLeft': 0, 'a': 0, 'A': 0,
+            'ArrowDown': 1, 's': 1, 'S': 1,
+            'ArrowUp': 2, 'w': 2, 'W': 2,
+            'ArrowRight': 3, 'd': 3, 'D': 3 
+        };
+        return map[key] !== undefined ? map[key] : -1;
+    }
+
+    checkHit(lane, player) {
+        const currentTime = this.music.getCurrentTime();
+        const note = this.notes.find(n => 
+            n.lane === lane && !n.hit && !n.missed && n.playerOwner === player &&
+            Math.abs(currentTime - n.time) < CONFIG.HIT_WINDOW
+        );
+
+        if (note) {
+            note.hit = true;
+            const diff = Math.abs(currentTime - note.time);
+            this.registerHit(player, diff, false);
+            
+            // Avisa o oponente que acertei e qual foi o timing
+            if(conn && conn.open) {
+                conn.send({ type: 'HIT_SCORE', diff: diff });
+            }
+        }
+    }
+
+    registerHit(player, diff, isRemote) {
+        let scoreGain = 350;
+        let healthImpact = 3; 
+
+        if (diff > 120) { scoreGain = 50; healthImpact = 1; }
+        else if (diff > 80) { scoreGain = 100; healthImpact = 2; }
+        
+        if (player === 'p1') {
+            this.p1Score += scoreGain;
+            this.health += healthImpact; 
+            this.p1Scale = 1.15;
+        } else {
+            this.p2Score += scoreGain;
+            this.health -= healthImpact;
+            this.p2Scale = 1.15;
+        }
+
+        if(this.health > 100) this.health = 100;
+        if(this.health < 0) this.health = 0;
+
+        this.updateUI();
+    }
+
+    onBeatHit() {
+        this.p1Scale = 1.05;
+        this.p2Scale = 1.05;
+    }
+
+    updateUI() {
+        document.querySelector('.p1-score').innerText = `HOST (AZUL): ${this.p1Score}`;
+        document.querySelector('.p2-score').innerText = `CLIENTE (ROXO): ${this.p2Score}`;
+    }
+
+    draw() {
+        this.ctx.fillStyle = '#111';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        // Stage e Luzes
+        const grad = this.ctx.createRadialGradient(640, 720, 100, 640, 0, 800);
+        grad.addColorStop(0, '#333');
+        grad.addColorStop(1, '#000');
+        this.ctx.fillStyle = grad;
+        this.ctx.fillRect(0,0,1280,720);
+
+        this.p1Scale += (1 - this.p1Scale) * 0.2;
+        this.p2Scale += (1 - this.p2Scale) * 0.2;
+
+        this.drawCharacter(250, 400, 'p2', this.p2Scale);
+        this.drawCharacter(850, 400, 'p1', this.p1Scale);
+
+        this.drawStrums(100, this.p2Keys); // P2 (Cliente)
+        this.drawStrums(750, this.p1Keys); // P1 (Host)
+
+        this.drawNotes();
+        this.drawHealthBar();
+        this.checkWinner();
+        
+        requestAnimationFrame(this.loop);
+    }
+
+    checkWinner() {
+        if (this.winner) return;
+        if (this.health <= 0) this.endGame('ROXO (CLIENTE) VENCEU!');
+        if (this.health >= 100) this.endGame('AZUL (HOST) VENCEU!');
+    }
+
+    drawCharacter(x, y, type, scale) {
+        this.ctx.save();
+        this.ctx.translate(x + 100, y + 100);
+        this.ctx.scale(scale, scale);
+        this.ctx.translate(-(x + 100), -(y + 100));
+        
+        // Indicador visual de "VOCÊ"
+        if(type === myPlayerId) {
+            this.ctx.fillStyle = 'yellow';
+            this.ctx.font = '20px Arial';
+            this.ctx.fillText("VOCÊ", x + 70, y - 20);
+        }
+
+        this.ctx.fillStyle = type === 'p1' ? '#31b0d1' : '#af66ce';
+        this.ctx.fillRect(x, y, 200, 200);
+        
+        this.ctx.fillStyle = 'white';
+        let eyeOffset = type === 'p1' ? 0 : 40;
+        this.ctx.fillRect(x + 20 + eyeOffset, y + 50, 50, 50);
+        this.ctx.fillRect(x + 90 + eyeOffset, y + 50, 50, 50);
+        
+        this.ctx.fillStyle = 'black';
+        this.ctx.fillRect(x + 35 + eyeOffset, y + 65, 20, 20);
+        this.ctx.fillRect(x + 105 + eyeOffset, y + 65, 20, 20);
+
+        this.ctx.fillStyle = '#222';
+        this.ctx.fillRect(x + 80, y + 130, 40, 20);
+        this.ctx.restore();
+    }
+
+    drawStrums(offsetX, keys) {
+        for (let i = 0; i < 4; i++) {
+            const x = offsetX + (i * 110);
+            const y = 100;
+            this.ctx.strokeStyle = COLORS[i];
+            this.ctx.lineWidth = 4;
+            
+            if (keys[i]) {
+                this.ctx.fillStyle = COLORS[i];
+                this.ctx.globalAlpha = 0.8;
+                this.drawArrow(x, y, i, true);
+                this.ctx.globalAlpha = 1.0;
+            } else {
+                this.ctx.fillStyle = '#333';
+                this.ctx.globalAlpha = 0.5;
+                this.drawArrow(x, y, i, true);
+                this.ctx.globalAlpha = 1.0;
+                this.ctx.stroke();
+            }
+        }
+    }
+
+    drawArrow(x, y, dir, filled) {
+        this.ctx.beginPath();
+        const s = 60;
+        if (dir === 0) { this.ctx.moveTo(x + s, y); this.ctx.lineTo(x, y + s/2); this.ctx.lineTo(x + s, y + s); }
+        else if (dir === 1) { this.ctx.moveTo(x, y); this.ctx.lineTo(x + s/2, y + s); this.ctx.lineTo(x + s, y); }
+        else if (dir === 2) { this.ctx.moveTo(x, y + s); this.ctx.lineTo(x + s/2, y); this.ctx.lineTo(x + s, y + s); }
+        else if (dir === 3) { this.ctx.moveTo(x, y); this.ctx.lineTo(x + s, y + s/2); this.ctx.lineTo(x, y + s); }
+        if (filled) this.ctx.fill();
+        this.ctx.stroke();
+    }
+
+    drawNotes() {
+        const currentTime = this.music.getCurrentTime();
+        this.notes.forEach(note => {
+            if (note.hit) return;
+            const distance = (note.time - currentTime) * (0.45 * CONFIG.SCROLL_SPEED);
+            const offsetX = note.playerOwner === 'p1' ? 750 : 100;
+            const x = offsetX + (note.lane * 110);
+            const y = 100 + distance;
+
+            // Miss logic (apenas para o dono da nota)
+            if (y < -50 && !note.missed && note.playerOwner === myPlayerId) {
+                note.missed = true;
+                // Reduz vida local e envia miss pro amigo (simplificado aqui como redução de score local por enquanto)
+            }
+
+            if (y > -100 && y < 800) {
+                this.ctx.fillStyle = COLORS[note.lane];
+                this.ctx.fillRect(x + 10, y + 10, 50, 50);
+                this.ctx.fillStyle = 'white';
+                this.ctx.fillRect(x + 22, y + 22, 26, 26);
+            }
+        });
+    }
+
+    drawHealthBar() {
+        const barWidth = 600; const barHeight = 25;
+        const x = (this.canvas.width / 2) - (barWidth / 2); const y = 650;
+        this.ctx.fillStyle = 'white'; this.ctx.fillRect(x - 4, y - 4, barWidth + 8, barHeight + 8);
+        this.ctx.fillStyle = '#af66ce'; this.ctx.fillRect(x, y, barWidth, barHeight);
+        const p1Width = (this.health / 100) * barWidth;
+        this.ctx.fillStyle = '#31b0d1'; this.ctx.fillRect(x + (barWidth - p1Width), y, p1Width, barHeight);
+        const iconX = x + (barWidth - p1Width);
+        this.ctx.fillStyle = '#af66ce'; this.ctx.beginPath(); this.ctx.arc(iconX - 20, y + 12, 25, 0, Math.PI*2); this.ctx.fill();
+        this.ctx.lineWidth=3; this.ctx.strokeStyle='black'; this.ctx.stroke();
+        this.ctx.fillStyle = '#31b0d1'; this.ctx.beginPath(); this.ctx.arc(iconX + 20, y + 12, 25, 0, Math.PI*2); this.ctx.fill();
+        this.ctx.stroke();
+    }
+
+    endGame(msg) {
+        this.winner = msg;
+        this.music.ctx.suspend();
+        this.ctx.fillStyle = 'rgba(0,0,0,0.9)';
+        this.ctx.fillRect(0,0,1280,720);
+        this.ctx.fillStyle = 'white';
+        this.ctx.font = "60px Arial Black";
+        this.ctx.textAlign = "center";
+        this.ctx.fillText(msg, 640, 360);
+        this.ctx.font = "30px Arial";
+        this.ctx.fillText("Recarregue a página para jogar de novo", 640, 420);
+    }
+
+    loop() {
+        if(this.winner) {
+            this.draw(); // Mantém desenhado o final
+            return;
+        };
+        this.draw();
+    }
+}
+
+const game = new Game();
+</script>
+</body>
+</html>
